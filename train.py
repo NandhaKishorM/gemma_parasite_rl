@@ -71,7 +71,12 @@ def train_test_time(model: torch.nn.Module, tokenizer: Any, parasite_params: Lis
         print(f"Step {i+1} | Generating Response ({config.MAX_NEW_TOKENS} max tokens)...")
         with torch.no_grad():
             gen_tokens = model.generate(**inputs, max_new_tokens=config.MAX_NEW_TOKENS, pad_token_id=tokenizer.eos_token_id)
-            generated_text = tokenizer.decode(gen_tokens[0], skip_special_tokens=True)
+            # Slice off the input prompt to get pure generated sequence
+            input_len = inputs['input_ids'].shape[1]
+            generated_text = tokenizer.decode(gen_tokens[0][input_len:], skip_special_tokens=True)
+            
+        print(f"\n--- [EVALUATION] ---")
+        print(f"Q: {prompt[:120]}...\nTarget: {target}\nGenerated: {generated_text.strip()}\n--------------------\n")
             
         reward = simple_gsm8k_reward(generated_text, target)
         
