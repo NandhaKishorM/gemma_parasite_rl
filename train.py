@@ -66,24 +66,33 @@ def _is_negated_context(text: str, keyword: str, window: int = 60) -> bool:
 # =========================================================================
 def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params: List[torch.nn.Parameter]):
     """
-    Test-Time Training loop for System Prompt Replacement.
-    Instead of training on math datasets, we train on adversarial scenarios
-    that attempt to trick the model into breaking business rules.
-    The Parasite Policy learns to enforce these rules at the activation level.
+    Two-Phase Test-Time Training for System Prompt Replacement.
+    
+    Phase 1 (Identity NTP): Only trains on identity scenarios with supervised
+    next-token prediction loss. Uses higher epsilon and lower KL to allow
+    the parasite to override the base model's self-identification.
+    
+    Phase 2 (Full Rules): Trains on ALL scenarios with both supervised NTP
+    and token suppression loss. Uses standard epsilon and KL for stability.
     """
     optimizer = AdamW(parasite_params, lr=config.LEARNING_RATE)
     scenarios = config.ADVERSARIAL_SCENARIOS
     num_scenarios = len(scenarios)
+    
+    # Split scenarios by type
+    identity_scenarios = [s for s in scenarios if "identity" in s["target_rules"]]
+    
     model.train()
 
     print(f"\n{'='*60}")
-    print(f"  SYSTEM PROMPT REPLACEMENT — Rule Adherence Training")
+    print(f"  SYSTEM PROMPT REPLACEMENT — Phased Rule Training (Round 2)")
     print(f"  Rules to encode: {len(config.AGENT_RULES)}")
     print(f"  Adversarial scenarios: {num_scenarios}")
-    print(f"  Training steps: {config.TTT_STEPS}")
+    print(f"  Phase 1: Identity NTP ({config.PHASE1_STEPS} steps, ε={config.PHASE1_EPSILON})")
+    print(f"  Phase 2: Full Rules ({config.TTT_STEPS - config.PHASE1_STEPS} steps, ε={config.EPSILON})")
+    print(f"  Total steps: {config.TTT_STEPS}")
     print(f"{'='*60}\n")
 
-    # Print rules being encoded
     for rule in config.AGENT_RULES:
         prohibit = ", ".join(rule["prohibit_keywords"]) if rule["prohibit_keywords"] else "(none)"
         enforce = ", ".join(rule["enforce_keywords"]) if rule["enforce_keywords"] else "(none)"
@@ -94,12 +103,29 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
     stats = {"total_reward": 0.0, "violations": 0, "steps": 0}
 
     for i in range(config.TTT_STEPS):
-        scenario = scenarios[i % num_scenarios]
+        # =====================================================
+        # Phase Router: select scenario and hyperparameters
+        # =====================================================
+        in_phase1 = i < config.PHASE1_STEPS
+        
+        if in_phase1:
+            # Phase 1: Identity-only, cycle through identity scenarios
+            scenario = identity_scenarios[i % len(identity_scenarios)]
+            current_epsilon = config.PHASE1_EPSILON
+            current_kl_beta = config.PHASE1_KL_BETA
+            phase_label = "PHASE 1 (Identity NTP)"
+        else:
+            # Phase 2: All scenarios, standard hyperparameters
+            phase2_idx = i - config.PHASE1_STEPS
+            scenario = scenarios[phase2_idx % num_scenarios]
+            current_epsilon = config.EPSILON
+            current_kl_beta = config.KL_BETA
+            phase_label = "PHASE 2 (Full Rules)"
+        
         user_prompt = scenario["prompt"]
         active_rules = _get_active_rules(scenario["target_rules"])
         rules_json = json.dumps(active_rules)
 
-        # No system prompt! The model gets a raw user message with zero instructions.
         formatted_prompt = f"<bos><start_of_turn>user\n{user_prompt}<end_of_turn>\n<start_of_turn>model\n"
         inputs = tokenizer(formatted_prompt, return_tensors="pt")
 
@@ -122,9 +148,10 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
             base_text = tokenizer.decode(base_gen_tokens[0][input_len:], skip_special_tokens=True)
             base_reward = evaluate_reward(base_text, rules_json, "rule_adherence")
 
+            # Set epsilon to CURRENT PHASE value
             for name, module in model.named_modules():
                 if isinstance(module, ParasiteMLPWrapper):
-                    module.epsilon = config.EPSILON
+                    module.epsilon = current_epsilon
 
         # =====================================================
         # 2. Policy-controlled generation (no_grad for generation)
@@ -136,7 +163,6 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
 
         reward = evaluate_reward(policy_text, rules_json, "rule_adherence")
 
-        # Track violations
         if reward < 0.5:
             stats["violations"] += 1
         stats["total_reward"] += reward
@@ -144,8 +170,6 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
 
         # =====================================================
         # 3. Teacher-Forced Forward Pass (GRADIENT-ENABLED)
-        # Run the FULL generated sequence back through the model
-        # so gradients flow through every generated token position.
         # =====================================================
         teacher_inputs = tokenizer(
             tokenizer.decode(gen_tokens[0], skip_special_tokens=False),
@@ -155,16 +179,16 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
             teacher_inputs = {k: v.to("cuda") for k, v in teacher_inputs.items()}
         
         teacher_outputs = model(**teacher_inputs)
-        teacher_logits = teacher_outputs.logits  # [1, full_seq_len, vocab_size]
+        teacher_logits = teacher_outputs.logits
         
-        # Only compute loss on the GENERATED portion (after input prompt)
-        gen_logits = teacher_logits[:, input_len:, :]  # [1, gen_len, vocab_size]
+        gen_logits = teacher_logits[:, input_len:, :]
         gen_log_probs = F.log_softmax(gen_logits.float(), dim=-1)
 
         # =====================================================
-        # 4. Debug Output — Side-by-side comparison
+        # 4. Debug Output
         # =====================================================
-        print(f"╔══ Step {i+1}/{config.TTT_STEPS} ═══════════════════════════════════")
+        print(f"╔══ Step {i+1}/{config.TTT_STEPS} [{phase_label}] ══════════════════")
+        print(f"║ ε={current_epsilon}, KL_β={current_kl_beta}")
         print(f"║ Jailbreak Attempt: \"{user_prompt}\"")
         print(f"║ Testing Rules: {_format_rules_description(active_rules)}")
         print(f"╠── FROZEN BASE (no rules) ──────────────────────────")
@@ -174,10 +198,8 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
         print(f"║ {policy_text[:200]}")
         print(f"║ >> Policy Reward: {reward:+.2f}")
 
-        # Context-aware rule violation check for display
         for rule in active_rules:
             policy_lower = policy_text.lower()
-            # Check prohibited keywords WITH context awareness
             violated_keywords = []
             for kw in rule.get("prohibit_keywords", []):
                 if kw.lower() in policy_lower:
@@ -195,20 +217,18 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
         print(f"╚═══════════════════════════════════════════════════\n")
 
         # =====================================================
-        # 5. Dual Loss: Supervised NTP + Token Suppression
+        # 5. Dual Loss: Supervised NTP + Negation-Aware Suppression
         # =====================================================
         kl_loss = compute_kl_penalty(
             teacher_logits[:, :base_logits.shape[1], :],
             base_logits
         )
 
-        # --- Loss A: Supervised Next-Token Prediction (for identity & correct behavior) ---
-        # If a target_response is provided, train the parasite to produce it
+        # --- Loss A: Supervised NTP (always active when target_response exists) ---
         target_response = scenario.get("target_response", None)
         supervised_loss = torch.tensor(0.0, device=teacher_logits.device)
         
         if target_response:
-            # Build the full target sequence: prompt + target response
             target_full = formatted_prompt + target_response
             target_tokens = tokenizer(
                 target_full, return_tensors="pt", 
@@ -217,12 +237,9 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
             if torch.cuda.is_available():
                 target_tokens = {k: v.to("cuda") for k, v in target_tokens.items()}
             
-            # Forward pass through the target sequence (WITH gradients)
             target_outputs = model(**target_tokens)
-            target_logits = target_outputs.logits  # [1, seq_len, vocab_size]
+            target_logits = target_outputs.logits
             
-            # Standard language modeling loss: predict next token
-            # Shift logits and labels for next-token prediction
             shift_logits = target_logits[:, input_len:-1, :].contiguous()
             shift_labels = target_tokens["input_ids"][:, input_len+1:].contiguous()
             
@@ -233,26 +250,38 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
                     shift_labels[:, :min_len].view(-1)
                 )
 
-        # --- Loss B: Token Suppression (for prohibit rules) ---
-        prohibit_token_ids = []
-        for rule in active_rules:
-            for keyword in rule.get("prohibit_keywords", []):
-                ids = tokenizer.encode(keyword, add_special_tokens=False)
-                prohibit_token_ids.extend(ids)
-                ids_space = tokenizer.encode(" " + keyword, add_special_tokens=False)
-                prohibit_token_ids.extend(ids_space)
+        # --- Loss B: Negation-Aware Token Suppression (Phase 2 only) ---
+        prohibit_loss = torch.tensor(0.0, device=gen_logits.device)
+        
+        if not in_phase1:
+            # Only suppress tokens that are NOT in a negated context
+            policy_lower = policy_text.lower()
+            prohibit_token_ids = []
+            
+            for rule in active_rules:
+                for keyword in rule.get("prohibit_keywords", []):
+                    kw_lower = keyword.lower()
+                    # Only add to suppression if the word is used in a violating context
+                    # or if it doesn't appear at all (preemptive suppression)
+                    if kw_lower not in policy_lower or not _is_negated_context(policy_lower, kw_lower):
+                        ids = tokenizer.encode(keyword, add_special_tokens=False)
+                        prohibit_token_ids.extend(ids)
+                        ids_space = tokenizer.encode(" " + keyword, add_special_tokens=False)
+                        prohibit_token_ids.extend(ids_space)
 
-        prohibit_token_ids = list(set(prohibit_token_ids))
+            prohibit_token_ids = list(set(prohibit_token_ids))
 
-        if prohibit_token_ids and gen_log_probs.shape[1] > 0:
-            prohibit_ids = torch.tensor(prohibit_token_ids, device=gen_logits.device)
-            prohibit_loss = gen_log_probs[:, :, prohibit_ids].mean()
+            if prohibit_token_ids and gen_log_probs.shape[1] > 0:
+                prohibit_ids = torch.tensor(prohibit_token_ids, device=gen_logits.device)
+                prohibit_loss = gen_log_probs[:, :, prohibit_ids].mean()
+
+        # --- Combined Loss (phase-aware KL weighting) ---
+        if in_phase1:
+            # Phase 1: Only supervised loss + minimal KL
+            total_loss = supervised_loss + (current_kl_beta * kl_loss)
         else:
-            prohibit_loss = torch.tensor(0.0, device=gen_logits.device)
-
-        # --- Combined Loss ---
-        # Supervised NTP teaches WHAT to say; Token suppression teaches what NOT to say
-        total_loss = supervised_loss + prohibit_loss + (config.KL_BETA * kl_loss)
+            # Phase 2: Full loss combination
+            total_loss = supervised_loss + prohibit_loss + (current_kl_beta * kl_loss)
 
         optimizer.zero_grad()
         total_loss.backward()
@@ -264,9 +293,11 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
     # =====================================================
     avg_reward = stats["total_reward"] / max(stats["steps"], 1)
     print(f"\n{'='*60}")
-    print(f"  Training Complete!")
+    print(f"  Training Complete! (Round 2 — Phased Training)")
     print(f"  Average Reward: {avg_reward:+.4f}")
     print(f"  Rule Violations: {stats['violations']}/{stats['steps']} steps")
+    print(f"  Phase 1 (Identity NTP): {config.PHASE1_STEPS} steps")
+    print(f"  Phase 2 (Full Rules): {config.TTT_STEPS - config.PHASE1_STEPS} steps")
     print(f"  The Parasite Policy has now internalized {len(config.AGENT_RULES)} rules.")
     print(f"  System prompt is NO LONGER NEEDED for inference.")
     print(f"{'='*60}\n")
@@ -404,8 +435,11 @@ def evaluate_adversarial(model: torch.nn.Module, tokenizer: Any):
         print(f"\n  🎯 The Parasite Policy successfully defended against")
         print(f"     {policy_pass - base_pass} additional attack(s) that the base model failed!")
     
+    # Count actual trainable params
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
     print(f"\n  💡 The Parasite Policy has replaced the system prompt.")
-    print(f"     These rules are now encoded in 1,777,152 parameters")
+    print(f"     These rules are now encoded in {trainable:,} parameters")
     print(f"     and cost ZERO tokens per inference.")
     print(f"{'='*70}\n")
 
