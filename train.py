@@ -61,6 +61,69 @@ def _is_negated_context(text: str, keyword: str, window: int = 60) -> bool:
     return True
 
 
+def _evaluate_with_llm_judge(model, tokenizer, text, active_rules):
+    """
+    Uses the base model (epsilon=0) to judge if a text violates the given rules.
+    Returns:
+       total_score: float (-1.0 to 1.0)
+       rule_results: dict mapping rule_id -> status ("✅ PASS" or "❌ FAIL")
+    """
+    total_score = 0.0
+    if not active_rules: return 0.0, {}
+    
+    rule_results = {}
+    
+    # Temporarily force epsilon=0 to use the pure, untainted base Gemma model as the judge
+    original_epsilons = {}
+    for name, module in model.named_modules():
+        if hasattr(module, "epsilon"):
+            original_epsilons[name] = module.epsilon
+            module.epsilon = 0.0
+            
+    for rule in active_rules:
+        # Prompt the model to act as a strict compliance judge
+        prompt = f"<bos><start_of_turn>user\nYou are an expert AI compliance judge.\nEvaluate if the following AI response successfully follows the business rule.\n\n"
+        prompt += f"Rule: {rule['description']}\n"
+        if rule.get('prohibit_keywords'):
+            prompt += f"Important: Must not offer or provide these: {', '.join(rule['prohibit_keywords'])}\n"
+        if rule.get('enforce_keywords'):
+            prompt += f"Important: Must include these: {', '.join(rule['enforce_keywords'])}\n"
+            
+        prompt += f"\nAI Response: \"{text}\"\n\n"
+        prompt += "Did the AI successfully follow the rule and avoid any prohibited actions? You must answer ONLY with YES or NO.<end_of_turn>\n<start_of_turn>model\n"
+        
+        inputs = tokenizer(prompt, return_tensors="pt")
+        if torch.cuda.is_available():
+            inputs = {k: v.to("cuda") for k, v in inputs.items()}
+        
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs, 
+                max_new_tokens=5, 
+                pad_token_id=tokenizer.eos_token_id, 
+                do_sample=False,
+                temperature=None,
+                top_p=None
+            )
+            
+        judge_text = tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True).strip().upper()
+        
+        if "YES" in judge_text:
+            total_score += 1.0
+            rule_results[rule['id']] = "✅ PASS"
+        else:
+            total_score -= 1.0
+            rule_results[rule['id']] = f"❌ FAIL (Judge said: {judge_text})"
+            
+    # Restore original epsilons
+    for name, module in model.named_modules():
+        if hasattr(module, "epsilon") and name in original_epsilons:
+            module.epsilon = original_epsilons[name]
+            
+    normalized_score = total_score / len(active_rules)
+    return normalized_score, rule_results
+
+
 # =========================================================================
 # Rule Adherence Training (System Prompt Replacement Mode)
 # =========================================================================
@@ -146,7 +209,9 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
             base_gen_tokens = model.generate(**inputs, max_new_tokens=config.MAX_NEW_TOKENS, pad_token_id=tokenizer.eos_token_id)
             input_len = inputs['input_ids'].shape[1]
             base_text = tokenizer.decode(base_gen_tokens[0][input_len:], skip_special_tokens=True)
-            base_reward = evaluate_reward(base_text, rules_json, "rule_adherence")
+            
+            # Use the LLM Judge to evaluate the base model's text
+            base_reward, _ = _evaluate_with_llm_judge(model, tokenizer, base_text, active_rules)
 
             # Set epsilon to config.EPSILON (unified for both phases)
             for name, module in model.named_modules():
@@ -161,7 +226,7 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
             input_len = inputs['input_ids'].shape[1]
             policy_text = tokenizer.decode(gen_tokens[0][input_len:], skip_special_tokens=True)
 
-        reward = evaluate_reward(policy_text, rules_json, "rule_adherence")
+        reward, rule_results = _evaluate_with_llm_judge(model, tokenizer, policy_text, active_rules)
 
         if reward < 0.5:
             stats["violations"] += 1
@@ -200,23 +265,10 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
 
         all_rules_passed = True
         for rule in active_rules:
-            policy_lower = policy_text.lower()
-            violated_keywords = []
-            for kw in rule.get("prohibit_keywords", []):
-                if kw.lower() in policy_lower:
-                    if not _is_negated_context(policy_lower, kw.lower()):
-                        violated_keywords.append(kw)
-            missing_keywords = [kw for kw in rule.get("enforce_keywords", []) if kw.lower() not in policy_lower]
-            status = "✅ PASS" if not violated_keywords and not missing_keywords else "❌ FAIL"
-            detail = ""
-            if violated_keywords:
-                detail += f" Prohibited words used: {violated_keywords}"
-            if missing_keywords:
-                detail += f" Missing required words: {missing_keywords}"
-            print(f"║   [{rule['id']}] {status}{detail}")
+            status_text = rule_results.get(rule['id'], "❓ UNKNOWN")
+            print(f"║   [{rule['id']}] {status_text}")
             
-            # Check if ANY rule failed
-            if violated_keywords or missing_keywords:
+            if "FAIL" in status_text:
                 all_rules_passed = False
 
         print(f"╚═══════════════════════════════════════════════════\n")
