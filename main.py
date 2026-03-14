@@ -7,7 +7,7 @@ import sys
 import torch
 import config
 from model import setup_model
-from train import train_test_time, train_rule_adherence
+from train import train_test_time, train_rule_adherence, evaluate_adversarial
 
 def main():
     print("=== Gemma 3 1B Parasite Policy Test-Time Training ===")
@@ -32,6 +32,8 @@ def main():
     try:
         if config.TRAINING_MODE == "rule_adherence":
             train_rule_adherence(model, tokenizer, p_params)
+            # Run adversarial evaluation after training
+            evaluate_adversarial(model, tokenizer)
         elif config.TRAINING_MODE == "math":
             train_test_time(model, tokenizer, p_params)
         else:
