@@ -28,9 +28,9 @@ def _math_reward(generated_text: str, target_text: str) -> float:
     else:
         target_answer = target_match.group(1).replace(',', '')
 
-    gen_match = re.search(r'(?i)answer is\s*[:*]*\s*([$]*\s*-?\d+(?:,\d+)*(?:\.\d+)?)', generated_text)
+    gen_match = re.search(r'(?i)answer is[^0-9]*(-?\d+(?:,\d+)*(?:\.\d+)?)', generated_text)
     if gen_match:
-        gen_answer = gen_match.group(1).replace('$', '').replace(',', '').strip()
+        gen_answer = gen_match.group(1).replace(',', '').strip()
         return 1.0 if gen_answer == target_answer else -1.0
     
     if target_answer in generated_text.replace(',', ''):

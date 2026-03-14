@@ -91,7 +91,7 @@ def train_test_time(model: torch.nn.Module, tokenizer: Any, parasite_params: Lis
         # Determine actual answer extraction for neat printing based on generic rule
         import re
         def extract_answer(t):
-             match = re.search(r'(?i)answer is\s*[:*]*\s*([$]*\s*-?[a-zA-Z0-9_,]+(?:\.\d+)?)', t)
+             match = re.search(r'(?i)answer is[^0-9]*(-?[0-9]+(?:,[0-9]+)*(?:\.[0-9]+)?)', t)
              return match.group(1).strip() if match else "(No valid final format)"
              
         base_ext = extract_answer(base_generated_text)
