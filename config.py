@@ -17,7 +17,7 @@ TARGET_LAYERS = [4, 8, 12, 16, 20, 24] # Layers to attach the parasite policy
 LEARNING_RATE = 5e-4
 MAX_GRAD_NORM = 0.5
 KL_BETA = 0.2  # Weight of the KL penalty to prevent catastrophic forgetting
-TTT_STEPS = 10  # Number of online test-time training steps
+TTT_STEPS = 100  # Number of online test-time training steps
 MAX_NEW_TOKENS = 200
 
 # =========================================================================
