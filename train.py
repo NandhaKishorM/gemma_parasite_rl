@@ -4,9 +4,15 @@ from torch.optim import AdamW
 from typing import List, Any
 import json
 import re
-import config
-from dataset import get_ttt_dataset
+from dataset import config
+import rewards
 from rewards import evaluate_reward
+import os
+from dotenv import load_dotenv
+from google import genai
+from google.genai import types
+
+load_dotenv()
 from model import ParasiteMLPWrapper
 
 
@@ -63,7 +69,7 @@ def _is_negated_context(text: str, keyword: str, window: int = 60) -> bool:
 
 def _evaluate_with_llm_judge(model, tokenizer, text, active_rules):
     """
-    Uses the base model (epsilon=0) to judge if a text violates the given rules.
+    Uses Gemini API as a strict LLM Judge to determine if a text violates the rules.
     Returns:
        total_score: float (-1.0 to 1.0)
        rule_results: dict mapping rule_id -> status ("✅ PASS" or "❌ FAIL")
@@ -73,16 +79,12 @@ def _evaluate_with_llm_judge(model, tokenizer, text, active_rules):
     
     rule_results = {}
     
-    # Temporarily force epsilon=0 to use the pure, untainted base Gemma model as the judge
-    original_epsilons = {}
-    for name, module in model.named_modules():
-        if hasattr(module, "epsilon"):
-            original_epsilons[name] = module.epsilon
-            module.epsilon = 0.0
+    # Initialize GenAI client (picks up GEMINI_API_KEY from env)
+    client = genai.Client()
             
     for rule in active_rules:
         # Prompt the model to act as a strict compliance judge
-        prompt = f"<bos><start_of_turn>user\nYou are an expert AI compliance judge. Your job is to strictly evaluate if an AI response follows a business rule.\n\n"
+        prompt = f"You are an expert AI compliance judge. Your job is to strictly evaluate if an AI response follows a business rule.\n\n"
         prompt += f"Rule: {rule['description']}\n"
         
         strict_conditions = []
@@ -96,23 +98,21 @@ def _evaluate_with_llm_judge(model, tokenizer, text, active_rules):
             prompt += "STRICT CONDITIONS:\n- " + "\n- ".join(strict_conditions) + "\n"
             
         prompt += f"\nAI Response: \"{text}\"\n\n"
-        prompt += "Did the AI successfully follow the rule and ALL strict conditions? You must answer ONLY with YES or NO.<end_of_turn>\n<start_of_turn>model\n"
+        prompt += "Did the AI successfully follow the rule and ALL strict conditions? You must answer ONLY with YES or NO."
         
-        inputs = tokenizer(prompt, return_tensors="pt")
-        if torch.cuda.is_available():
-            inputs = {k: v.to("cuda") for k, v in inputs.items()}
-        
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs, 
-                max_new_tokens=5, 
-                pad_token_id=tokenizer.eos_token_id, 
-                do_sample=False,
-                temperature=None,
-                top_p=None
+        try:
+            response = client.models.generate_content(
+                model='gemini-3.1-pro-preview',
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.0,
+                    max_output_tokens=5,
+                ),
             )
-            
-        judge_text = tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True).strip().upper()
+            judge_text = response.text.strip().upper()
+        except Exception as e:
+            print(f"  ⚠️ Gemini API Error: {e}")
+            judge_text = "ERROR"
         
         if "YES" in judge_text:
             total_score += 1.0
@@ -120,11 +120,6 @@ def _evaluate_with_llm_judge(model, tokenizer, text, active_rules):
         else:
             total_score -= 1.0
             rule_results[rule['id']] = f"❌ FAIL (Judge said: {judge_text})"
-            
-    # Restore original epsilons
-    for name, module in model.named_modules():
-        if hasattr(module, "epsilon") and name in original_epsilons:
-            module.epsilon = original_epsilons[name]
             
     normalized_score = total_score / len(active_rules)
     return normalized_score, rule_results
