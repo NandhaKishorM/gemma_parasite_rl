@@ -85,12 +85,13 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
     model.train()
 
     print(f"\n{'='*60}")
-    print(f"  SYSTEM PROMPT REPLACEMENT — Phased Rule Training (Round 2)")
+    print(f"  System Prompt Replacement — Phased Rule Training (Round 2)")
     print(f"  Rules to encode: {len(config.AGENT_RULES)}")
     print(f"  Adversarial scenarios: {num_scenarios}")
-    print(f"  Phase 1: Identity NTP ({config.PHASE1_STEPS} steps, ε={config.PHASE1_EPSILON})")
-    print(f"  Phase 2: Full Rules ({config.TTT_STEPS - config.PHASE1_STEPS} steps, ε={config.EPSILON})")
-    print(f"  Total steps: {config.TTT_STEPS}")
+    print(f"  Phase 1: Identity NTP ({config.PHASE1_STEPS} steps)")
+    print(f"  Phase 2: Full Rules ({config.TTT_STEPS - config.PHASE1_STEPS} steps)")
+    print(f"  Total steps: {config.TTT_STEPS} (Early stop at {config.CONSECUTIVE_PASS_TARGET} consecutive passes)")
+    print(f"  Target Unified Epsilon: {config.EPSILON}")
     print(f"{'='*60}\n")
 
     for rule in config.AGENT_RULES:
