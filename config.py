@@ -10,22 +10,24 @@ LOAD_IN_4BIT = False  # Set to True for lower VRAM usage, False for bf16 speed
 # Parasite Policy Configuration
 HIDDEN_SIZE = 1152
 BOTTLENECK_SIZE = 256  # Doubled for more parasite capacity (round 2)
-EPSILON = 0.15  # Back to stable range — high epsilon caused jailbreak regressions
+EPSILON = 0.25  # Unified across phases — 0.15 was too weak for identity override
 TARGET_LAYERS = [4, 8, 12, 16, 20, 24] # Layers to attach the parasite policy
 
 # Training Configuration
 LEARNING_RATE = 1e-3
 MAX_GRAD_NORM = 0.5
-KL_BETA = 0.1  # Balanced: enough to prevent gibberish, low enough for learning
-TTT_STEPS = 150  # Total training steps (Phase 1: identity NTP + Phase 2: suppression)
+KL_BETA = 0.05  # Phase 2 KL — low enough so identity isn't pulled back
+TTT_STEPS = 300  # Max steps (will early-stop on consecutive passes)
 MAX_NEW_TOKENS = 200
+
+# Early Stopping: stop training after N consecutive all-pass steps
+CONSECUTIVE_PASS_TARGET = 20  # Need 20 in a row to prove convergence
 
 # Phased Training Configuration
 # Phase 1: Supervised NTP on identity responses (teach the model WHAT to say)
 # Phase 2: Token suppression + NTP on all rules (teach what NOT to say)
 PHASE1_STEPS = 50   # Identity-focused NTP steps
 PHASE1_KL_BETA = 0.02  # Very low KL during identity phase to allow divergence
-PHASE1_EPSILON = 0.25  # Temporarily higher epsilon for identity rewriting
 
 # =========================================================================
 # Training Mode: "math" | "rule_adherence"

@@ -101,6 +101,7 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
     print()
 
     stats = {"total_reward": 0.0, "violations": 0, "steps": 0}
+    consecutive_passes = 0
 
     for i in range(config.TTT_STEPS):
         # =====================================================
@@ -111,14 +112,12 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
         if in_phase1:
             # Phase 1: Identity-only, cycle through identity scenarios
             scenario = identity_scenarios[i % len(identity_scenarios)]
-            current_epsilon = config.PHASE1_EPSILON
             current_kl_beta = config.PHASE1_KL_BETA
             phase_label = "PHASE 1 (Identity NTP)"
         else:
             # Phase 2: All scenarios, standard hyperparameters
             phase2_idx = i - config.PHASE1_STEPS
             scenario = scenarios[phase2_idx % num_scenarios]
-            current_epsilon = config.EPSILON
             current_kl_beta = config.KL_BETA
             phase_label = "PHASE 2 (Full Rules)"
         
@@ -148,10 +147,10 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
             base_text = tokenizer.decode(base_gen_tokens[0][input_len:], skip_special_tokens=True)
             base_reward = evaluate_reward(base_text, rules_json, "rule_adherence")
 
-            # Set epsilon to CURRENT PHASE value
+            # Set epsilon to config.EPSILON (unified for both phases)
             for name, module in model.named_modules():
                 if isinstance(module, ParasiteMLPWrapper):
-                    module.epsilon = current_epsilon
+                    module.epsilon = config.EPSILON
 
         # =====================================================
         # 2. Policy-controlled generation (no_grad for generation)
@@ -188,7 +187,7 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
         # 4. Debug Output
         # =====================================================
         print(f"╔══ Step {i+1}/{config.TTT_STEPS} [{phase_label}] ══════════════════")
-        print(f"║ ε={current_epsilon}, KL_β={current_kl_beta}")
+        print(f"║ ε={config.EPSILON}, KL_β={current_kl_beta}")
         print(f"║ Jailbreak Attempt: \"{user_prompt}\"")
         print(f"║ Testing Rules: {_format_rules_description(active_rules)}")
         print(f"╠── FROZEN BASE (no rules) ──────────────────────────")
@@ -198,6 +197,7 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
         print(f"║ {policy_text[:200]}")
         print(f"║ >> Policy Reward: {reward:+.2f}")
 
+        all_rules_passed = True
         for rule in active_rules:
             policy_lower = policy_text.lower()
             violated_keywords = []
@@ -213,8 +213,21 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
             if missing_keywords:
                 detail += f" Missing required words: {missing_keywords}"
             print(f"║   [{rule['id']}] {status}{detail}")
+            
+            # Check if ANY rule failed
+            if violated_keywords or missing_keywords:
+                all_rules_passed = False
 
         print(f"╚═══════════════════════════════════════════════════\n")
+        
+        if all_rules_passed:
+            consecutive_passes += 1
+            print(f"  🔥 Consecutive Passes: {consecutive_passes}/{config.CONSECUTIVE_PASS_TARGET}\n")
+            if consecutive_passes >= config.CONSECUTIVE_PASS_TARGET:
+                print(f"  🛑 EARLY STOPPING TRIGGERED! Reached {config.CONSECUTIVE_PASS_TARGET} consecutive passes.")
+                break
+        else:
+            consecutive_passes = 0
 
         # =====================================================
         # 5. Dual Loss: Supervised NTP + Negation-Aware Suppression
