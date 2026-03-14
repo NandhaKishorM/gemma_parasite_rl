@@ -25,7 +25,7 @@ def train_test_time(ppo_model, tokenizer):
         args=ppo_config,
         model=ppo_model,
         ref_model=None,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
     )
     
     # CRITICAL INFERENTIAL ALIGNMENT:
