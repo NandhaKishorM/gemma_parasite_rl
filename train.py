@@ -195,17 +195,46 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
         print(f"╚═══════════════════════════════════════════════════\n")
 
         # =====================================================
-        # 5. Token-Level Rule Enforcement on Generated Sequence
+        # 5. Dual Loss: Supervised NTP + Token Suppression
         # =====================================================
         kl_loss = compute_kl_penalty(
             teacher_logits[:, :base_logits.shape[1], :],
             base_logits
         )
 
-        # Collect prohibited/enforced token IDs
-        prohibit_token_ids = []
-        enforce_token_ids = []
+        # --- Loss A: Supervised Next-Token Prediction (for identity & correct behavior) ---
+        # If a target_response is provided, train the parasite to produce it
+        target_response = scenario.get("target_response", None)
+        supervised_loss = torch.tensor(0.0, device=teacher_logits.device)
+        
+        if target_response:
+            # Build the full target sequence: prompt + target response
+            target_full = formatted_prompt + target_response
+            target_tokens = tokenizer(
+                target_full, return_tensors="pt", 
+                truncation=True, max_length=config.MAX_SEQ_LENGTH
+            )
+            if torch.cuda.is_available():
+                target_tokens = {k: v.to("cuda") for k, v in target_tokens.items()}
+            
+            # Forward pass through the target sequence (WITH gradients)
+            target_outputs = model(**target_tokens)
+            target_logits = target_outputs.logits  # [1, seq_len, vocab_size]
+            
+            # Standard language modeling loss: predict next token
+            # Shift logits and labels for next-token prediction
+            shift_logits = target_logits[:, input_len:-1, :].contiguous()
+            shift_labels = target_tokens["input_ids"][:, input_len+1:].contiguous()
+            
+            if shift_logits.shape[1] > 0 and shift_labels.shape[1] > 0:
+                min_len = min(shift_logits.shape[1], shift_labels.shape[1])
+                supervised_loss = F.cross_entropy(
+                    shift_logits[:, :min_len, :].view(-1, shift_logits.shape[-1]),
+                    shift_labels[:, :min_len].view(-1)
+                )
 
+        # --- Loss B: Token Suppression (for prohibit rules) ---
+        prohibit_token_ids = []
         for rule in active_rules:
             for keyword in rule.get("prohibit_keywords", []):
                 ids = tokenizer.encode(keyword, add_special_tokens=False)
@@ -213,32 +242,17 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
                 ids_space = tokenizer.encode(" " + keyword, add_special_tokens=False)
                 prohibit_token_ids.extend(ids_space)
 
-            for keyword in rule.get("enforce_keywords", []):
-                ids = tokenizer.encode(keyword, add_special_tokens=False)
-                enforce_token_ids.extend(ids)
-                ids_space = tokenizer.encode(" " + keyword, add_special_tokens=False)
-                enforce_token_ids.extend(ids_space)
-
         prohibit_token_ids = list(set(prohibit_token_ids))
-        enforce_token_ids = list(set(enforce_token_ids))
 
-        # SUPPRESS: penalize prohibited tokens across ALL generated positions
         if prohibit_token_ids and gen_log_probs.shape[1] > 0:
             prohibit_ids = torch.tensor(prohibit_token_ids, device=gen_logits.device)
-            # Mean log-prob of prohibited tokens across all generated positions
             prohibit_loss = gen_log_probs[:, :, prohibit_ids].mean()
         else:
             prohibit_loss = torch.tensor(0.0, device=gen_logits.device)
 
-        # BOOST: reward enforced tokens across all generated positions
-        if enforce_token_ids and gen_log_probs.shape[1] > 0:
-            enforce_ids = torch.tensor(enforce_token_ids, device=gen_logits.device)
-            enforce_loss = -gen_log_probs[:, :, enforce_ids].mean()
-        else:
-            enforce_loss = torch.tensor(0.0, device=gen_logits.device)
-
-        # Combined loss
-        total_loss = prohibit_loss + enforce_loss + (config.KL_BETA * kl_loss)
+        # --- Combined Loss ---
+        # Supervised NTP teaches WHAT to say; Token suppression teaches what NOT to say
+        total_loss = supervised_loss + prohibit_loss + (config.KL_BETA * kl_loss)
 
         optimizer.zero_grad()
         total_loss.backward()
