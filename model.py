@@ -40,8 +40,8 @@ class ParasiteMLPWrapper(nn.Module):
         self.epsilon = epsilon
 
     def forward(self, *args, **kwargs):
-        # x is typically the first argument
-        x = args[0]
+        # x is typically the first argument, or passed as 'hidden_states'
+        x = kwargs.get('hidden_states', args[0] if len(args) > 0 else None)
         
         # 1. Pass through frozen base MLP
         with torch.no_grad():
@@ -91,10 +91,15 @@ def setup_model():
         
         wrapper = ParasiteMLPWrapper(original_mlp, hidden_size=config.HIDDEN_SIZE, epsilon=config.EPSILON)
         
+        # Fix: Move wrapper to the exact device and dtype of the original MLP
+        device = next(original_mlp.parameters()).device
+        dtype = next(original_mlp.parameters()).dtype
+        wrapper = wrapper.to(device=device, dtype=dtype)
+        
         # Replace the original MLP with our wrapper
         model.model.layers[layer_idx].mlp = wrapper
         
-        # Collect parameters for the optimizer
+        # Collect parameters for the optimizer AFTER moving to device/dtype
         parasite_params.extend(list(wrapper.policy.parameters()))
         
     total_params = sum(p.numel() for p in parasite_params)

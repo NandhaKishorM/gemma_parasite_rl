@@ -47,6 +47,7 @@ def train_test_time(model: torch.nn.Module, tokenizer: Any, parasite_params: Lis
         # =====================================================
         # 1. Base Model Pass (No policy interference for KL target)
         # =====================================================
+        print(f"Step {i+1} | Executing Base Model Pass (Might compile kernels on 1st run)...")
         with torch.no_grad():
             for name, module in model.named_modules():
                 if isinstance(module, ParasiteMLPWrapper):
@@ -62,10 +63,12 @@ def train_test_time(model: torch.nn.Module, tokenizer: Any, parasite_params: Lis
         # =====================================================
         # 2. Policy-controlled pass
         # =====================================================
+        print(f"Step {i+1} | Executing Policy-controlled Pass...")
         outputs = model(**inputs)
         logits = outputs.logits
         
-        # Simulate generating text to calculate reward (in real scenario, we sample trajectories)
+        # Simulate generating text to calculate reward
+        print(f"Step {i+1} | Generating Response ({config.MAX_NEW_TOKENS} max tokens)...")
         with torch.no_grad():
             gen_tokens = model.generate(**inputs, max_new_tokens=config.MAX_NEW_TOKENS, pad_token_id=tokenizer.eos_token_id)
             generated_text = tokenizer.decode(gen_tokens[0], skip_special_tokens=True)
@@ -75,6 +78,7 @@ def train_test_time(model: torch.nn.Module, tokenizer: Any, parasite_params: Lis
         # =====================================================
         # 3. Guardrails & Loss Calculation
         # =====================================================
+        print(f"Step {i+1} | Calculating Guardrails & Updating Policy...")
         # KL Guardrail (Crucial to prevent gibberish and preserve intelligence)
         kl_loss = compute_kl_penalty(logits, base_logits)
         
