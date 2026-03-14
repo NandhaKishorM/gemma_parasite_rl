@@ -4,7 +4,7 @@ from torch.optim import AdamW
 from typing import List, Any
 import config
 from dataset import get_ttt_dataset
-from rewards import simple_gsm8k_reward
+from rewards import evaluate_reward
 from model import ParasiteMLPWrapper
 
 def compute_kl_penalty(logits: torch.Tensor, base_logits: torch.Tensor) -> torch.Tensor:
@@ -37,8 +37,12 @@ def train_test_time(model: torch.nn.Module, tokenizer: Any, parasite_params: Lis
         prompt = example['question']
         target = example['answer']
         
-        # Format for Gemma Instruction format with explicit instruction for the reward parser
-        formatted_prompt = f"<bos><start_of_turn>user\n{prompt}\nThink step by step and end with 'The answer is [number]'.<end_of_turn>\n<start_of_turn>model\n"
+        # Determine reasoning strategy hint based on generic task type (currently defaulting to math for GSM8K demonstration)
+        task_type = "math" # Change this based on dataset (e.g., 'boolean', 'exact_match')
+        hint = "\nThink step by step and end with 'The answer is [number]'." if task_type == "math" else "\nThink step by step and end with 'The answer is [your final answer]'."
+        
+        # Format for Gemma Instruction format
+        formatted_prompt = f"<bos><start_of_turn>user\n{prompt}{hint}<end_of_turn>\n<start_of_turn>model\n"
         inputs = tokenizer(formatted_prompt, return_tensors="pt")
         
         if torch.cuda.is_available():
@@ -60,7 +64,7 @@ def train_test_time(model: torch.nn.Module, tokenizer: Any, parasite_params: Lis
             base_gen_tokens = model.generate(**inputs, max_new_tokens=config.MAX_NEW_TOKENS, pad_token_id=tokenizer.eos_token_id)
             input_len = inputs['input_ids'].shape[1]
             base_generated_text = tokenizer.decode(base_gen_tokens[0][input_len:], skip_special_tokens=True)
-            base_reward = simple_gsm8k_reward(base_generated_text, target)
+            base_reward = evaluate_reward(base_generated_text, target, task_type)
             
             for name, module in model.named_modules():
                 if isinstance(module, ParasiteMLPWrapper):
@@ -84,17 +88,17 @@ def train_test_time(model: torch.nn.Module, tokenizer: Any, parasite_params: Lis
         print(f"\n--- [EVALUATION] ---")
         print(f"Q: {prompt[:120]}...\nTarget: {target}")
         
-        # Determine actual math answer extraction for neat printing
+        # Determine actual answer extraction for neat printing based on generic rule
         import re
         def extract_answer(t):
-             match = re.search(r'(?i)answer is\s*[:*]*\s*([$]*\s*-?\d+(?:,\d+)*(?:\.\d+)?)', t)
+             match = re.search(r'(?i)answer is\s*[:*]*\s*([$]*\s*-?[a-zA-Z0-9_,]+(?:\.\d+)?)', t)
              return match.group(1).strip() if match else "(No valid final format)"
              
         base_ext = extract_answer(base_generated_text)
         pol_ext = extract_answer(generated_text)
         
         # Calculate actual RL reward targeting the parasite 
-        reward = simple_gsm8k_reward(generated_text, target)
+        reward = evaluate_reward(generated_text, target, task_type)
         
         print(f"\n[FROZEN BASE GEN]: ... {base_generated_text[-120:]}")
         print(f"  > Extracted Final Answer: {base_ext} | Reward: {base_reward}")
