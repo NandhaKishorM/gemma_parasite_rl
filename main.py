@@ -18,17 +18,17 @@ def main():
     print(f"Target Device: {device.upper()}")
     
     # 1. Setup Model
-    ppo_model, tokenizer = setup_model()
+    model, tokenizer, p_params = setup_model()
     
-    if ppo_model is None:
+    if model is None:
         print("Failed to initialize model. Exiting.")
         sys.exit(1)
         
-    ppo_model = ppo_model.to(device)
+    model = model.to(device)
     
     # 2. Run Test-Time Learning Loop
     try:
-        train_test_time(ppo_model, tokenizer)
+        train_test_time(model, tokenizer, p_params)
         print("\nTest-Time Training (TTT) pipeline execution complete.")
     except KeyboardInterrupt:
         print("\nTraining interrupted by user. Exiting gracefully.")

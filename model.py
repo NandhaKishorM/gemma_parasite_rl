@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from trl import AutoModelForCausalLMWithValueHead
 import config
 
 # =============================================================================
@@ -31,7 +30,7 @@ class ParasitePolicyNetwork(nn.Module):
 
 class ParasiteMLPWrapper(nn.Module):
     """
-    Wraps the Unsloth/Gemma MLP to inject the policy gating.
+    Wraps the HuggingFace MLP to inject the policy gating.
     h = original_mlp(x) * (1 + epsilon * tanh(policy(x)))
     """
     def __init__(self, original_mlp, hidden_size=config.HIDDEN_SIZE, epsilon=config.EPSILON):
@@ -66,8 +65,6 @@ class ParasiteMLPWrapper(nn.Module):
 def setup_model():
     """
     Loads Gemma 3 1B using standard HuggingFace transformers, applies the parasite layers.
-    Using standard HF (instead of Unsloth) prevents Triton kernel compilation deadlocks
-    when structurally modifying the internal `.mlp` modules.
     """
     print(f"Loading Base {config.MODEL_NAME} via Transformers...")
     try:
@@ -89,13 +86,13 @@ def setup_model():
     print(f"Attaching Parasitic Policy Networks to layers: {config.TARGET_LAYERS}")
     
     parasite_params = []
-    # Identify the MLP layers in Gemma 3 Unsloth Implementation
+    # Identify the MLP layers in Gemma 3 Implementation
     for layer_idx in config.TARGET_LAYERS:
         original_mlp = model.model.layers[layer_idx].mlp
         
         wrapper = ParasiteMLPWrapper(original_mlp, hidden_size=config.HIDDEN_SIZE, epsilon=config.EPSILON)
         
-        # Fix: Move wrapper to the exact device and dtype of the original MLP
+        # Move wrapper to the exact device and dtype of the original MLP
         device = next(original_mlp.parameters()).device
         dtype = next(original_mlp.parameters()).dtype
         wrapper = wrapper.to(device=device, dtype=dtype)
@@ -103,9 +100,9 @@ def setup_model():
         # Replace the original MLP with our wrapper
         model.model.layers[layer_idx].mlp = wrapper
         
-    print("Wrapping model with trl's AutoModelForCausalLMWithValueHead...")
-    ppo_model = AutoModelForCausalLMWithValueHead(model)
+        # Collect parameters for the optimizer AFTER moving to device/dtype
+        parasite_params.extend(list(wrapper.policy.parameters()))
         
-    total_trainable = sum(p.numel() for p in ppo_model.parameters() if p.requires_grad)
-    print(f"Model ready. Trainable params (Parasite + Value Head): {total_trainable:,}")
-    return ppo_model, tokenizer
+    total_params = sum(p.numel() for p in parasite_params)
+    print(f"Parasite injected successfully. Trainable params: {total_params:,}")
+    return model, tokenizer, parasite_params
