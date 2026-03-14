@@ -34,8 +34,8 @@ def train_test_time(model: torch.nn.Module, tokenizer: Any, parasite_params: Lis
     
     for i in range(config.TTT_STEPS):
         example = dataset[i]
-        prompt = example['question']
-        target = example['answer']
+        prompt = example.get('question', example.get('problem', ''))
+        target = str(example.get('answer', example.get('solution', '')))
         
         # Determine reasoning strategy hint based on generic task type (currently defaulting to math for GSM8K demonstration)
         task_type = "math" # Change this based on dataset (e.g., 'boolean', 'exact_match')

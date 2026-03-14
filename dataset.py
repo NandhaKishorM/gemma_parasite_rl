@@ -3,9 +3,9 @@ Dataset loading and processing for Test-Time Training.
 """
 from datasets import load_dataset
 
-def get_ttt_dataset(dataset_name="openai/gsm8k", config_name="main", split="train"):
+def get_ttt_dataset(dataset_name="AI-MO/aimo-validation-aime", config_name="default", split="train"):
     """
-    Loads a reasoning dataset (like GSM8K) to train the policy during Test-Time.
+    Loads a reasoning dataset (like AIME) to train the policy during Test-Time.
     Mathematical reasoning scenarios are excellent for steering the policy to improve reasoning.
     """
     print(f"Loading test-time training dataset ({dataset_name})...")
