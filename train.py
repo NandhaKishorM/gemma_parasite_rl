@@ -4,8 +4,8 @@ from torch.optim import AdamW
 from typing import List, Any
 import json
 import re
-from dataset import config
-import rewards
+import config
+from dataset import get_ttt_dataset
 from rewards import evaluate_reward
 import os
 from dotenv import load_dotenv
