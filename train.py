@@ -37,8 +37,8 @@ def train_test_time(model: torch.nn.Module, tokenizer: Any, parasite_params: Lis
         prompt = example['question']
         target = example['answer']
         
-        # Format for Gemma Instruction format
-        formatted_prompt = f"<bos><start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
+        # Format for Gemma Instruction format with explicit instruction for the reward parser
+        formatted_prompt = f"<bos><start_of_turn>user\n{prompt}\nThink step by step and end with 'The answer is [number]'.<end_of_turn>\n<start_of_turn>model\n"
         inputs = tokenizer(formatted_prompt, return_tensors="pt")
         
         if torch.cuda.is_available():
