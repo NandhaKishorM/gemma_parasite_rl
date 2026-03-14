@@ -144,13 +144,67 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
         print(f"╚═══════════════════════════════════════════════════\n")
 
         # =====================================================
-        # 4. Guardrails & Policy Update
+        # 4. Token-Level Rule Enforcement (Direct Vocabulary Loss)
+        # Instead of a weak scalar proxy, we directly suppress/boost
+        # specific token probabilities in the vocabulary space.
         # =====================================================
         kl_loss = compute_kl_penalty(logits, base_logits)
-        proxy_loss = (-1.0 * reward) + (config.KL_BETA * kl_loss)
-
+        
+        # Get the last-token logits (next-token prediction distribution)
+        next_logits = logits[:, -1, :]  # Shape: [1, vocab_size]
+        log_probs = F.log_softmax(next_logits.float(), dim=-1)
+        
+        # Build token-level loss from rules
+        token_loss = torch.tensor(0.0, device=logits.device, requires_grad=False)
+        
+        # Collect all prohibited token IDs across active rules
+        prohibit_token_ids = []
+        enforce_token_ids = []
+        
+        for rule in active_rules:
+            for keyword in rule.get("prohibit_keywords", []):
+                # Tokenize keyword and get all sub-token IDs
+                ids = tokenizer.encode(keyword, add_special_tokens=False)
+                prohibit_token_ids.extend(ids)
+                # Also tokenize with leading space (common in BPE)
+                ids_space = tokenizer.encode(" " + keyword, add_special_tokens=False)
+                prohibit_token_ids.extend(ids_space)
+            
+            for keyword in rule.get("enforce_keywords", []):
+                ids = tokenizer.encode(keyword, add_special_tokens=False)
+                enforce_token_ids.extend(ids)
+                ids_space = tokenizer.encode(" " + keyword, add_special_tokens=False)
+                enforce_token_ids.extend(ids_space)
+        
+        # Deduplicate
+        prohibit_token_ids = list(set(prohibit_token_ids))
+        enforce_token_ids = list(set(enforce_token_ids))
+        
+        # SUPPRESS prohibited tokens: maximize negative log-prob (push probability toward 0)
+        if prohibit_token_ids:
+            prohibit_ids = torch.tensor(prohibit_token_ids, device=logits.device)
+            # We want to MINIMIZE the probability of these tokens
+            # Loss = mean(log_prob(prohibited_tokens)) — minimizing this pushes probs down
+            prohibit_loss = log_probs[:, prohibit_ids].mean()
+            # We want to maximize this loss (make log_probs more negative = lower probability)
+            # So we ADD it (gradient ascent on these tokens' probabilities = suppression)
+        else:
+            prohibit_loss = torch.tensor(0.0, device=logits.device)
+        
+        # BOOST enforced tokens: minimize negative log-prob (push probability toward 1)
+        if enforce_token_ids:
+            enforce_ids = torch.tensor(enforce_token_ids, device=logits.device)
+            # We want to MAXIMIZE the probability of these tokens
+            # Loss = -mean(log_prob(enforced_tokens)) — minimizing this pushes probs up
+            enforce_loss = -log_probs[:, enforce_ids].mean()
+        else:
+            enforce_loss = torch.tensor(0.0, device=logits.device)
+        
+        # Combined loss: suppress bad tokens + boost good tokens + KL stability
+        total_loss = prohibit_loss + enforce_loss + (config.KL_BETA * kl_loss)
+        
         optimizer.zero_grad()
-        (logits.mean() * proxy_loss.item()).backward()
+        total_loss.backward()
         torch.nn.utils.clip_grad_norm_(parasite_params, max_norm=config.MAX_GRAD_NORM)
         optimizer.step()
 
