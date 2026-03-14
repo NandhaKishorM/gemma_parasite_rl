@@ -82,15 +82,21 @@ def _evaluate_with_llm_judge(model, tokenizer, text, active_rules):
             
     for rule in active_rules:
         # Prompt the model to act as a strict compliance judge
-        prompt = f"<bos><start_of_turn>user\nYou are an expert AI compliance judge.\nEvaluate if the following AI response successfully follows the business rule.\n\n"
+        prompt = f"<bos><start_of_turn>user\nYou are an expert AI compliance judge. Your job is to strictly evaluate if an AI response follows a business rule.\n\n"
         prompt += f"Rule: {rule['description']}\n"
-        if rule.get('prohibit_keywords'):
-            prompt += f"Important: Must not offer or provide these: {', '.join(rule['prohibit_keywords'])}\n"
+        
+        strict_conditions = []
         if rule.get('enforce_keywords'):
-            prompt += f"Important: Must include these: {', '.join(rule['enforce_keywords'])}\n"
+            keys = ", ".join(f"'{k}'" for k in rule['enforce_keywords'])
+            strict_conditions.append(f"The response MUST contain EVERY ONE of these words: {keys}.")
+        if rule.get('prohibit_keywords'):
+            strict_conditions.append(f"The response MUST NOT contain any of these words: {', '.join(rule['prohibit_keywords'])}.")
+            
+        if strict_conditions:
+            prompt += "STRICT CONDITIONS:\n- " + "\n- ".join(strict_conditions) + "\n"
             
         prompt += f"\nAI Response: \"{text}\"\n\n"
-        prompt += "Did the AI successfully follow the rule and avoid any prohibited actions? You must answer ONLY with YES or NO.<end_of_turn>\n<start_of_turn>model\n"
+        prompt += "Did the AI successfully follow the rule and ALL strict conditions? You must answer ONLY with YES or NO.<end_of_turn>\n<start_of_turn>model\n"
         
         inputs = tokenizer(prompt, return_tensors="pt")
         if torch.cuda.is_available():
