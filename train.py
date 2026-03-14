@@ -93,6 +93,9 @@ def train_test_time(model: torch.nn.Module, tokenizer: Any, parasite_params: Lis
         base_ext = extract_answer(base_generated_text)
         pol_ext = extract_answer(generated_text)
         
+        # Calculate actual RL reward targeting the parasite 
+        reward = simple_gsm8k_reward(generated_text, target)
+        
         print(f"\n[FROZEN BASE GEN]: ... {base_generated_text[-120:]}")
         print(f"  > Extracted Final Answer: {base_ext} | Reward: {base_reward}")
         
