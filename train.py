@@ -17,8 +17,6 @@ def train_test_time(ppo_model, tokenizer):
         learning_rate=config.LEARNING_RATE,
         batch_size=config.BATCH_SIZE,
         mini_batch_size=config.MINI_BATCH_SIZE,
-        init_kl_coef=config.KL_BETA,
-        target_kl=0.1,
     )
     
     print("\nInitializing trl.PPOTrainer...")
