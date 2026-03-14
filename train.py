@@ -22,7 +22,7 @@ def train_test_time(ppo_model, tokenizer):
     print("\nInitializing trl.PPOTrainer...")
     # Because we don't pass ref_model, PPOTrainer deepcopies ppo_model into a ref_model structure.
     ppo_trainer = PPOTrainer(
-        config=ppo_config,
+        args=ppo_config,
         model=ppo_model,
         ref_model=None,
         tokenizer=tokenizer,
