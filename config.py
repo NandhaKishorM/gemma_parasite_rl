@@ -19,3 +19,6 @@ MAX_GRAD_NORM = 0.5
 KL_BETA = 0.2  # Weight of the KL penalty to prevent catastrophic forgetting
 TTT_STEPS = 5  # Number of online test-time training steps for demonstration
 MAX_NEW_TOKENS = 40
+BATCH_SIZE = 1
+MINI_BATCH_SIZE = 1
+PPO_EPOCHS = 1

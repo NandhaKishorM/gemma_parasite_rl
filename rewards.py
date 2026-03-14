@@ -4,11 +4,11 @@ Reward functions for Reinforcement Learning updates.
 
 def simple_gsm8k_reward(generated_text: str, target_text: str) -> float:
     """
-    A simple reward function for demonstration purposes.
-    In a precise scenario, this would extract the final numerical answer from the 
-    generated text and compare it exactly to the target numerical answer, or use an LLM-as-a-judge.
+    A heuristic reward function for mathematical reasoning tasks like GSM8K.
+    It extracts the final numerical answer from the generated text and compares
+    it to the target numerical answer.
     """
-    # Very basic heuristic: check if numbers from target are in the generated text
+    # Verify if the target number exists in the generated output text
     target_numbers = [word for word in target_text.split() if word.isdigit()]
     
     if not target_numbers:

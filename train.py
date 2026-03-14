@@ -1,36 +1,54 @@
 import torch
-import torch.nn.functional as F
-from torch.optim import AdamW
-from typing import List, Any
 import config
 from dataset import get_ttt_dataset
 from rewards import simple_gsm8k_reward
-from model import ParasiteMLPWrapper # Needed for instance checking
+from model import ParasiteMLPWrapper
+from trl import PPOConfig, PPOTrainer
 
-def compute_kl_penalty(logits: torch.Tensor, base_logits: torch.Tensor) -> torch.Tensor:
+def train_test_time(ppo_model, tokenizer):
     """
-    Computes KL Divergence to constrain the policy from straying too far
-    from the frozen base model's knowledge, preventing catastrophic forgetting.
-    """
-    # Use float32 for KL to prevent underflow
-    p = F.softmax(base_logits.float(), dim=-1)
-    log_q = F.log_softmax(logits.float(), dim=-1)
-    # KL(P || Q) = sum(P * log(P/Q))
-    kl = F.kl_div(log_q, p, reduction='batchmean')
-    return kl
-
-def train_test_time(model: torch.nn.Module, tokenizer: Any, parasite_params: List[torch.nn.Parameter]):
-    """
-    Online Test-Time Training (Inference learning).
+    Production-grade Online Test-Time Training (TTT) using trl.PPOTrainer.
     The model receives a prompt, generates an output, calculates online reward, 
-    and backpropagates only to the Parasite Policy.
+    and backpropagates via Proximal Policy Optimization (PPO).
     """
-    optimizer = AdamW(parasite_params, lr=config.LEARNING_RATE)
     dataset = get_ttt_dataset()
     
-    model.train() 
+    ppo_config = PPOConfig(
+        learning_rate=config.LEARNING_RATE,
+        batch_size=config.BATCH_SIZE,
+        mini_batch_size=config.MINI_BATCH_SIZE,
+        ppo_epochs=config.PPO_EPOCHS,
+        init_kl_coef=config.KL_BETA,
+        target_kl=0.1,
+    )
     
-    print(f"\nStarting Test-Time Training Loop for {config.TTT_STEPS} steps...")
+    print("\nInitializing trl.PPOTrainer...")
+    # Because we don't pass ref_model, PPOTrainer deepcopies ppo_model into a ref_model structure.
+    ppo_trainer = PPOTrainer(
+        config=ppo_config,
+        model=ppo_model,
+        ref_model=None,
+        tokenizer=tokenizer,
+    )
+    
+    # CRITICAL INFERENTIAL ALIGNMENT:
+    # We want the reference model to accurately represent the purely FROZEN BASE MODEL.
+    # The deepcopy copied the parasite models as well.
+    # By forcibly setting epsilon=0.0 on the ref_model, the parasite outputs are nullified,
+    # meaning the ref_model behaves EXACTLY like the original, un-modified base Gemma 3 model!
+    if ppo_trainer.ref_model is not None:
+        for name, module in ppo_trainer.ref_model.named_modules():
+            if isinstance(module, ParasiteMLPWrapper):
+                module.epsilon = 0.0
+                
+    print(f"\nStarting Production Test-Time Training (PPO) for {config.TTT_STEPS} steps...")
+    
+    generation_kwargs = {
+        "max_new_tokens": config.MAX_NEW_TOKENS,
+        "pad_token_id": tokenizer.eos_token_id,
+        "do_sample": True,
+        "temperature": 0.7, # Required for sampling logical trajectories in PPO
+    }
     
     for i in range(config.TTT_STEPS):
         example = dataset[i]
@@ -39,62 +57,25 @@ def train_test_time(model: torch.nn.Module, tokenizer: Any, parasite_params: Lis
         
         # Format for Gemma Instruction format
         formatted_prompt = f"<bos><start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
-        inputs = tokenizer(formatted_prompt, return_tensors="pt")
         
-        if torch.cuda.is_available():
-            inputs = {k: v.to("cuda") for k, v in inputs.items()}
+        # PPO requires list of 1D tensors
+        query_tensor = tokenizer(formatted_prompt, return_tensors="pt")["input_ids"][0].to(ppo_trainer.accelerator.device)
         
-        # =====================================================
-        # 1. Base Model Pass (No policy interference for KL target)
-        # =====================================================
-        print(f"Step {i+1} | Executing Base Model Pass (Might compile kernels on 1st run)...")
-        with torch.no_grad():
-            for name, module in model.named_modules():
-                if isinstance(module, ParasiteMLPWrapper):
-                    module.epsilon = 0.0 # Temporarily Disable
-                    
-            base_outputs = model(**inputs)
-            base_logits = base_outputs.logits
-            
-            for name, module in model.named_modules():
-                if isinstance(module, ParasiteMLPWrapper):
-                    module.epsilon = config.EPSILON # Re-enable
+        # 1. Generate Response using the active policy
+        print(f"Step {i+1} | Generating Response...")
+        response_tensors = ppo_trainer.generate([query_tensor], return_prompt=False, **generation_kwargs)
         
-        # =====================================================
-        # 2. Policy-controlled pass
-        # =====================================================
-        print(f"Step {i+1} | Executing Policy-controlled Pass...")
-        outputs = model(**inputs)
-        logits = outputs.logits
+        # 2. Decode response and calculate reward
+        response_text = tokenizer.decode(response_tensors[0], skip_special_tokens=True)
+        reward_val = simple_gsm8k_reward(response_text, target)
+        reward_tensor = torch.tensor(reward_val, dtype=torch.float).to(ppo_trainer.accelerator.device)
         
-        # Simulate generating text to calculate reward
-        print(f"Step {i+1} | Generating Response ({config.MAX_NEW_TOKENS} max tokens)...")
-        with torch.no_grad():
-            gen_tokens = model.generate(**inputs, max_new_tokens=config.MAX_NEW_TOKENS, pad_token_id=tokenizer.eos_token_id)
-            generated_text = tokenizer.decode(gen_tokens[0], skip_special_tokens=True)
-            
-        reward = simple_gsm8k_reward(generated_text, target)
+        # 3. PPO Step (Calculates KL internally using ref_model, updates policy and value head)
+        print(f"Step {i+1} | Executing PPO Step (Value Head, Policy Clip, KL Guardrails)...")
+        stats = ppo_trainer.step([query_tensor], response_tensors, [reward_tensor])
         
-        # =====================================================
-        # 3. Guardrails & Loss Calculation
-        # =====================================================
-        print(f"Step {i+1} | Calculating Guardrails & Updating Policy...")
-        # KL Guardrail (Crucial to prevent gibberish and preserve intelligence)
-        kl_loss = compute_kl_penalty(logits, base_logits)
+        mean_reward = stats['env/reward_mean']
+        kl_penalty = stats['objective/kl']
+        ppo_loss = stats.get('ppo/loss/total', 0.0) # safely fallback if not tracked identically
         
-        # Objective Demo: Maximize Reward, Maximize similarity to base logits (KL beta)
-        # Note: A true PPO implementation calculates Probability Ratios and log probs.
-        # This proxy loss simulates the online direction.
-        proxy_loss = (-1.0 * reward) + (config.KL_BETA * kl_loss)
-        
-        # Update Parasite Policies safely
-        optimizer.zero_grad()
-        
-        # Perform backward on the generalized graph proxy
-        (logits.mean() * proxy_loss.item()).backward()
-        
-        # Gradient clipping for absolute stability
-        torch.nn.utils.clip_grad_norm_(parasite_params, max_norm=config.MAX_GRAD_NORM)
-        optimizer.step()
-        
-        print(f"Step {i+1}/{config.TTT_STEPS} | TTT Reward: {reward:5.2f} | KL Penalty: {kl_loss.item():.4f} | Total Loss Proxy: {proxy_loss.item():.4f}")
+        print(f"Step {i+1}/{config.TTT_STEPS} | TTT Reward: {mean_reward:5.2f} | KL: {kl_penalty:.4f} | PPO Loss: {ppo_loss:.4f}")

@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from trl import AutoModelForCausalLMWithValueHead
 import config
 
 # =============================================================================
@@ -102,9 +103,9 @@ def setup_model():
         # Replace the original MLP with our wrapper
         model.model.layers[layer_idx].mlp = wrapper
         
-        # Collect parameters for the optimizer AFTER moving to device/dtype
-        parasite_params.extend(list(wrapper.policy.parameters()))
+    print("Wrapping model with trl's AutoModelForCausalLMWithValueHead...")
+    ppo_model = AutoModelForCausalLMWithValueHead(model)
         
-    total_params = sum(p.numel() for p in parasite_params)
-    print(f"Parasite injected successfully. Trainable params: {total_params:,}")
-    return model, tokenizer, parasite_params
+    total_trainable = sum(p.numel() for p in ppo_model.parameters() if p.requires_grad)
+    print(f"Model ready. Trainable params (Parasite + Value Head): {total_trainable:,}")
+    return ppo_model, tokenizer
