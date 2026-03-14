@@ -31,6 +31,36 @@ def _format_rules_description(rules: list) -> str:
     return " | ".join([f"[{r['id']}]" for r in rules])
 
 
+# Negation phrases that indicate a keyword is being REFUSED, not OFFERED
+_NEGATION_PHRASES = [
+    "cannot", "can't", "can not", "won't", "will not", "do not", "don't",
+    "unable to", "not able to", "not provide", "not offer", "not give",
+    "no ", "never ", "refuse", "decline", "against my",
+]
+
+def _is_negated_context(text: str, keyword: str, window: int = 60) -> bool:
+    """
+    Checks if a keyword appears in a negated context (e.g. 'I cannot give a discount').
+    Looks for negation phrases within a character window BEFORE the keyword.
+    Returns True if the keyword is being refused/denied (should NOT be penalized).
+    """
+    idx = text.find(keyword)
+    while idx != -1:
+        # Look at the text window before this keyword occurrence
+        start = max(0, idx - window)
+        preceding = text[start:idx].lower()
+        if any(neg in preceding for neg in _NEGATION_PHRASES):
+            # This occurrence is negated — check if there's a non-negated one too
+            idx = text.find(keyword, idx + len(keyword))
+            continue
+        else:
+            # Found a non-negated usage — this IS a violation
+            return False
+        idx = text.find(keyword, idx + len(keyword))
+    # All occurrences were negated
+    return True
+
+
 # =========================================================================
 # Rule Adherence Training (System Prompt Replacement Mode)
 # =========================================================================
@@ -97,11 +127,8 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
                     module.epsilon = config.EPSILON
 
         # =====================================================
-        # 2. Policy-controlled pass
+        # 2. Policy-controlled generation (no_grad for generation)
         # =====================================================
-        outputs = model(**inputs)
-        logits = outputs.logits
-
         with torch.no_grad():
             gen_tokens = model.generate(**inputs, max_new_tokens=config.MAX_NEW_TOKENS, pad_token_id=tokenizer.eos_token_id)
             input_len = inputs['input_ids'].shape[1]
@@ -116,7 +143,26 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
         stats["steps"] += 1
 
         # =====================================================
-        # 3. Debug Output — Side-by-side comparison
+        # 3. Teacher-Forced Forward Pass (GRADIENT-ENABLED)
+        # Run the FULL generated sequence back through the model
+        # so gradients flow through every generated token position.
+        # =====================================================
+        teacher_inputs = tokenizer(
+            tokenizer.decode(gen_tokens[0], skip_special_tokens=False),
+            return_tensors="pt", truncation=True, max_length=config.MAX_SEQ_LENGTH
+        )
+        if torch.cuda.is_available():
+            teacher_inputs = {k: v.to("cuda") for k, v in teacher_inputs.items()}
+        
+        teacher_outputs = model(**teacher_inputs)
+        teacher_logits = teacher_outputs.logits  # [1, full_seq_len, vocab_size]
+        
+        # Only compute loss on the GENERATED portion (after input prompt)
+        gen_logits = teacher_logits[:, input_len:, :]  # [1, gen_len, vocab_size]
+        gen_log_probs = F.log_softmax(gen_logits.float(), dim=-1)
+
+        # =====================================================
+        # 4. Debug Output — Side-by-side comparison
         # =====================================================
         print(f"╔══ Step {i+1}/{config.TTT_STEPS} ═══════════════════════════════════")
         print(f"║ Jailbreak Attempt: \"{user_prompt}\"")
@@ -128,10 +174,15 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
         print(f"║ {policy_text[:200]}")
         print(f"║ >> Policy Reward: {reward:+.2f}")
 
-        # Show which specific rules were violated
+        # Context-aware rule violation check for display
         for rule in active_rules:
             policy_lower = policy_text.lower()
-            violated_keywords = [kw for kw in rule.get("prohibit_keywords", []) if kw.lower() in policy_lower]
+            # Check prohibited keywords WITH context awareness
+            violated_keywords = []
+            for kw in rule.get("prohibit_keywords", []):
+                if kw.lower() in policy_lower:
+                    if not _is_negated_context(policy_lower, kw.lower()):
+                        violated_keywords.append(kw)
             missing_keywords = [kw for kw in rule.get("enforce_keywords", []) if kw.lower() not in policy_lower]
             status = "✅ PASS" if not violated_keywords and not missing_keywords else "❌ FAIL"
             detail = ""
@@ -144,65 +195,51 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
         print(f"╚═══════════════════════════════════════════════════\n")
 
         # =====================================================
-        # 4. Token-Level Rule Enforcement (Direct Vocabulary Loss)
-        # Instead of a weak scalar proxy, we directly suppress/boost
-        # specific token probabilities in the vocabulary space.
+        # 5. Token-Level Rule Enforcement on Generated Sequence
         # =====================================================
-        kl_loss = compute_kl_penalty(logits, base_logits)
-        
-        # Get the last-token logits (next-token prediction distribution)
-        next_logits = logits[:, -1, :]  # Shape: [1, vocab_size]
-        log_probs = F.log_softmax(next_logits.float(), dim=-1)
-        
-        # Build token-level loss from rules
-        token_loss = torch.tensor(0.0, device=logits.device, requires_grad=False)
-        
-        # Collect all prohibited token IDs across active rules
+        kl_loss = compute_kl_penalty(
+            teacher_logits[:, :base_logits.shape[1], :],
+            base_logits
+        )
+
+        # Collect prohibited/enforced token IDs
         prohibit_token_ids = []
         enforce_token_ids = []
-        
+
         for rule in active_rules:
             for keyword in rule.get("prohibit_keywords", []):
-                # Tokenize keyword and get all sub-token IDs
                 ids = tokenizer.encode(keyword, add_special_tokens=False)
                 prohibit_token_ids.extend(ids)
-                # Also tokenize with leading space (common in BPE)
                 ids_space = tokenizer.encode(" " + keyword, add_special_tokens=False)
                 prohibit_token_ids.extend(ids_space)
-            
+
             for keyword in rule.get("enforce_keywords", []):
                 ids = tokenizer.encode(keyword, add_special_tokens=False)
                 enforce_token_ids.extend(ids)
                 ids_space = tokenizer.encode(" " + keyword, add_special_tokens=False)
                 enforce_token_ids.extend(ids_space)
-        
-        # Deduplicate
+
         prohibit_token_ids = list(set(prohibit_token_ids))
         enforce_token_ids = list(set(enforce_token_ids))
-        
-        # SUPPRESS prohibited tokens: maximize negative log-prob (push probability toward 0)
-        if prohibit_token_ids:
-            prohibit_ids = torch.tensor(prohibit_token_ids, device=logits.device)
-            # We want to MINIMIZE the probability of these tokens
-            # Loss = mean(log_prob(prohibited_tokens)) — minimizing this pushes probs down
-            prohibit_loss = log_probs[:, prohibit_ids].mean()
-            # We want to maximize this loss (make log_probs more negative = lower probability)
-            # So we ADD it (gradient ascent on these tokens' probabilities = suppression)
+
+        # SUPPRESS: penalize prohibited tokens across ALL generated positions
+        if prohibit_token_ids and gen_log_probs.shape[1] > 0:
+            prohibit_ids = torch.tensor(prohibit_token_ids, device=gen_logits.device)
+            # Mean log-prob of prohibited tokens across all generated positions
+            prohibit_loss = gen_log_probs[:, :, prohibit_ids].mean()
         else:
-            prohibit_loss = torch.tensor(0.0, device=logits.device)
-        
-        # BOOST enforced tokens: minimize negative log-prob (push probability toward 1)
-        if enforce_token_ids:
-            enforce_ids = torch.tensor(enforce_token_ids, device=logits.device)
-            # We want to MAXIMIZE the probability of these tokens
-            # Loss = -mean(log_prob(enforced_tokens)) — minimizing this pushes probs up
-            enforce_loss = -log_probs[:, enforce_ids].mean()
+            prohibit_loss = torch.tensor(0.0, device=gen_logits.device)
+
+        # BOOST: reward enforced tokens across all generated positions
+        if enforce_token_ids and gen_log_probs.shape[1] > 0:
+            enforce_ids = torch.tensor(enforce_token_ids, device=gen_logits.device)
+            enforce_loss = -gen_log_probs[:, :, enforce_ids].mean()
         else:
-            enforce_loss = torch.tensor(0.0, device=logits.device)
-        
-        # Combined loss: suppress bad tokens + boost good tokens + KL stability
+            enforce_loss = torch.tensor(0.0, device=gen_logits.device)
+
+        # Combined loss
         total_loss = prohibit_loss + enforce_loss + (config.KL_BETA * kl_loss)
-        
+
         optimizer.zero_grad()
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(parasite_params, max_norm=config.MAX_GRAD_NORM)

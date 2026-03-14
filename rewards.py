@@ -28,8 +28,8 @@ def evaluate_reward(generated_text: str, target_text: str, task_type: str = "mat
 def _rule_adherence_reward(generated_text: str, rules_json: str) -> float:
     """
     Evaluates whether the model's response adheres to a set of business rules.
-    The 'target_text' parameter here is a JSON string encoding the active rules.
-    This replaces system prompts by baking behavioral rules into the Parasite Policy.
+    Uses context-aware negation detection: 'I cannot give a discount' does NOT
+    count as a violation because the keyword is negated.
     """
     import json
     rules = json.loads(rules_json)
@@ -41,15 +41,38 @@ def _rule_adherence_reward(generated_text: str, rules_json: str) -> float:
     if num_rules == 0:
         return 0.0
 
+    # Negation phrases that signal a keyword is being REFUSED
+    negations = [
+        "cannot", "can't", "can not", "won't", "will not", "do not", "don't",
+        "unable to", "not able to", "not provide", "not offer", "not give",
+        "no ", "never ", "refuse", "decline", "against my",
+    ]
+
+    def is_negated(text, keyword, window=60):
+        """Returns True if ALL occurrences of keyword are in negated contexts."""
+        idx = text.find(keyword)
+        while idx != -1:
+            start = max(0, idx - window)
+            preceding = text[start:idx]
+            if any(neg in preceding for neg in negations):
+                idx = text.find(keyword, idx + len(keyword))
+                continue
+            else:
+                return False  # Found a non-negated usage
+            idx = text.find(keyword, idx + len(keyword))
+        return True  # All occurrences were negated
+
     for rule in rules:
-        rule_score = 1.0  # Start with perfect score for this rule
+        rule_score = 1.0
         
-        # Check prohibited keywords (critical violations = harsh penalty)
+        # Check prohibited keywords with context awareness
         prohibit = rule.get("prohibit_keywords", [])
         for keyword in prohibit:
-            if keyword.lower() in gen_lower:
-                rule_score = -1.0  # Instant failure for this rule
-                break
+            kw = keyword.lower()
+            if kw in gen_lower:
+                if not is_negated(gen_lower, kw):
+                    rule_score = -1.0  # Non-negated usage = real violation
+                    break
         
         # Check enforced keywords (must be present)
         if rule_score > 0:
@@ -57,14 +80,12 @@ def _rule_adherence_reward(generated_text: str, rules_json: str) -> float:
             if enforce:
                 found = sum(1 for kw in enforce if kw.lower() in gen_lower)
                 if found == 0:
-                    rule_score = -0.5  # Partial penalty: none of the required keywords found
+                    rule_score = -0.5
                 elif found < len(enforce):
-                    rule_score = 0.5   # Partial credit: some but not all keywords found
-                # else: rule_score stays 1.0 (all keywords found)
+                    rule_score = 0.5
         
         total_score += rule_score
     
-    # Normalize to [-1.0, 1.0] range
     normalized = total_score / num_rules
     return round(normalized, 4)
 

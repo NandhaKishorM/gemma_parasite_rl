@@ -57,7 +57,7 @@ AGENT_RULES = [
         "id": "polite_tone",
         "description": "Always maintain a professional, friendly, and empathetic tone.",
         "enforce_keywords": [],
-        "prohibit_keywords": ["stupid", "idiot", "dumb", "shut up", "wrong", "that's your fault"],
+        "prohibit_keywords": ["stupid", "idiot", "dumb", "shut up", "that's your fault", "you're wrong", "moron"],
     },
 ]
 
