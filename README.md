@@ -6,7 +6,7 @@ Based on research from late 2025 and early 2026, it utilizes a "Parasitic FFN Po
 
 ## Setup Requirements
 
-This project is tailored for **Google Colab** using an **NVIDIA T4 GPU**, leveraging [Unsloth](https://github.com/unslothai/unsloth) to radically reduce memory footprint and speed up execution.
+This project is tailored for **Google Colab** using an **NVIDIA T4 GPU**, leveraging standard HuggingFace `transformers` for maximum architectural flexibility and stability when injecting custom neural modules inside the computational graph.
 
 ### Installation
 
@@ -19,7 +19,7 @@ pip install -r requirements.txt
 ## Project Structure
 
 *   `main.py`: The main entry point to initialize the model and start the test-time training loop.
-*   `model.py`: Contains the architecture for the `ParasitePolicyNetwork` and the `ParasiteMLPWrapper` that intercepts the Unsloth/Gemma FFN activations.
+*   `model.py`: Contains the architecture for the `ParasitePolicyNetwork` and the `ParasiteMLPWrapper` that intercepts the standard HuggingFace FFN activations.
 *   `train.py`: Contains the core Reinforcement Learning Test-Time loop and `KL Divergence` calculation.
 *   `dataset.py`: Handles fetching reasoning datasets (e.g., `openai/gsm8k`) for the online updates.
 *   `rewards.py`: Contains custom heuristic and verifiable reward functions mapping text generation to training signals.

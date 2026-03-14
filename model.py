@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from unsloth import FastLanguageModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
 import config
 
 # =============================================================================
@@ -64,18 +64,21 @@ class ParasiteMLPWrapper(nn.Module):
 
 def setup_model():
     """
-    Loads Gemma 3 1B using Unsloth, applies the parasite layers.
+    Loads Gemma 3 1B using standard HuggingFace transformers, applies the parasite layers.
+    Using standard HF (instead of Unsloth) prevents Triton kernel compilation deadlocks
+    when structurally modifying the internal `.mlp` modules.
     """
-    print(f"Loading Base {config.MODEL_NAME}...")
+    print(f"Loading Base {config.MODEL_NAME} via Transformers...")
     try:
-        model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name=config.MODEL_NAME,
-            max_seq_length=config.MAX_SEQ_LENGTH,
-            dtype=torch.bfloat16,
-            load_in_4bit=config.LOAD_IN_4BIT,
+        tokenizer = AutoTokenizer.from_pretrained(config.MODEL_NAME)
+        # Using float32 for maximum safety on T4 with Gemma 3
+        model = AutoModelForCausalLM.from_pretrained(
+            config.MODEL_NAME,
+            torch_dtype=torch.float32,
+            device_map="auto",
         )
     except Exception as e:
-        print(f"Error loading model from Unsloth. Please check your token/setup: {e}")
+        print(f"Error loading model from HuggingFace. Please check your token/setup: {e}")
         return None, None, []
         
     # Freeze the entire base model
