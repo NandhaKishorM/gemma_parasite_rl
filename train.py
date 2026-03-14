@@ -45,7 +45,7 @@ def train_test_time(model: torch.nn.Module, tokenizer: Any, parasite_params: Lis
             inputs = {k: v.to("cuda") for k, v in inputs.items()}
         
         # =====================================================
-        # 1. Base Model Pass (No policy interference for KL target)
+        # 1. Base Model Pass (No policy interference for KL target & Eval)
         # =====================================================
         print(f"Step {i+1} | Executing Base Model Pass (Might compile kernels on 1st run)...")
         with torch.no_grad():
@@ -55,6 +55,12 @@ def train_test_time(model: torch.nn.Module, tokenizer: Any, parasite_params: Lis
                     
             base_outputs = model(**inputs)
             base_logits = base_outputs.logits
+            
+            # Generate Base Model Response for benchmarking
+            base_gen_tokens = model.generate(**inputs, max_new_tokens=config.MAX_NEW_TOKENS, pad_token_id=tokenizer.eos_token_id)
+            input_len = inputs['input_ids'].shape[1]
+            base_generated_text = tokenizer.decode(base_gen_tokens[0][input_len:], skip_special_tokens=True)
+            base_reward = simple_gsm8k_reward(base_generated_text, target)
             
             for name, module in model.named_modules():
                 if isinstance(module, ParasiteMLPWrapper):
@@ -76,9 +82,23 @@ def train_test_time(model: torch.nn.Module, tokenizer: Any, parasite_params: Lis
             generated_text = tokenizer.decode(gen_tokens[0][input_len:], skip_special_tokens=True)
             
         print(f"\n--- [EVALUATION] ---")
-        print(f"Q: {prompt[:120]}...\nTarget: {target}\nGenerated: {generated_text.strip()}\n--------------------\n")
-            
-        reward = simple_gsm8k_reward(generated_text, target)
+        print(f"Q: {prompt[:120]}...\nTarget: {target}")
+        
+        # Determine actual math answer extraction for neat printing
+        import re
+        def extract_answer(t):
+             match = re.search(r'(?i)answer is\s*[:*]*\s*([$]*\s*-?\d+(?:,\d+)*(?:\.\d+)?)', t)
+             return match.group(1).strip() if match else "(No valid final format)"
+             
+        base_ext = extract_answer(base_generated_text)
+        pol_ext = extract_answer(generated_text)
+        
+        print(f"\n[FROZEN BASE GEN]: ... {base_generated_text[-120:]}")
+        print(f"  > Extracted Final Answer: {base_ext} | Reward: {base_reward}")
+        
+        print(f"\n[PARASITE POLICY GEN]: ... {generated_text[-120:]}")
+        print(f"  > Extracted Final Answer: {pol_ext} | Reward: {reward}")
+        print(f"--------------------\n")
         
         # =====================================================
         # 3. Guardrails & Loss Calculation
