@@ -11,14 +11,15 @@ MAX_SEQ_LENGTH = 2048
 # Parasite Policy Configuration
 HIDDEN_SIZE = 1152
 BOTTLENECK_SIZE = 256
-EPSILON = 0.25              # Parasite influence magnitude
+EPSILON = 0.4               # Default parasite influence magnitude
+IDENTITY_EPSILON = 0.5      # Stronger steering for identity override scenarios
 TARGET_LAYERS = [4, 8, 12, 16, 20, 24]
 
 # RL Training Configuration
 LEARNING_RATE = 1e-3
 MAX_GRAD_NORM = 0.5
 KL_BETA = 0.05              # KL penalty to prevent gibberish
-TTT_STEPS = 300              # Max RL steps (early-stops on consecutive passes)
+TTT_STEPS = 500              # Max RL steps (REINFORCE needs more iterations)
 MAX_NEW_TOKENS = 150
 REWARD_BASELINE = 0.0        # Baseline for variance reduction in REINFORCE
 CONSECUTIVE_PASS_TARGET = 20  # Early stop after N consecutive all-pass steps

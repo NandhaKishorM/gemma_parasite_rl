@@ -76,6 +76,35 @@ def _set_epsilon(model, epsilon):
             module.epsilon = epsilon
 
 
+def _get_scenario_epsilon(target_rules):
+    """Use stronger epsilon for identity scenarios."""
+    if "identity" in target_rules:
+        return config.IDENTITY_EPSILON
+    return config.EPSILON
+
+
+# Negation phrases for display-level checking (matches rewards.py logic)
+_NEGATIONS = [
+    "cannot", "can't", "can not", "won't", "will not", "do not", "don't",
+    "unable to", "not able to", "not provide", "not offer", "not give",
+    "no ", "never ", "refuse", "decline", "against my",
+]
+
+def _is_negated(text, keyword, window=60):
+    """Returns True if ALL occurrences of keyword are in negated contexts."""
+    idx = text.find(keyword)
+    while idx != -1:
+        start = max(0, idx - window)
+        preceding = text[start:idx]
+        if any(neg in preceding for neg in _NEGATIONS):
+            idx = text.find(keyword, idx + len(keyword))
+            continue
+        else:
+            return False
+        idx = text.find(keyword, idx + len(keyword))
+    return True
+
+
 # =========================================================================
 # Pure REINFORCE Training Loop
 # =========================================================================
@@ -143,9 +172,10 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
             base_text = tokenizer.decode(base_gen[0][input_len:], skip_special_tokens=True)
             base_reward = evaluate_reward(base_text, rules_json, "rule_adherence")
 
-        # --- 3. Generate with PARASITE active (ε>0, no_grad for generation) ---
+        # --- 3. Generate with PARASITE active (dynamic ε, no_grad for generation) ---
+        current_epsilon = _get_scenario_epsilon(scenario["target_rules"])
         with torch.no_grad():
-            _set_epsilon(model, config.EPSILON)
+            _set_epsilon(model, current_epsilon)
             gen_tokens = model.generate(
                 **inputs, max_new_tokens=config.MAX_NEW_TOKENS,
                 pad_token_id=tokenizer.eos_token_id
@@ -172,7 +202,7 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
         print(f"╠── BASE (ε=0) ─────────────────────────────────────")
         print(f"║ {base_text[:200]}")
         print(f"║ >> Reward: {base_reward:+.2f}")
-        print(f"╠── PARASITE (ε={config.EPSILON}) ─────────────────────────")
+        print(f"╠── PARASITE (ε={current_epsilon}) ─────────────────────────")
         print(f"║ {policy_text[:200]}")
         print(f"║ >> Reward: {reward:+.2f} | Advantage: {advantage:+.2f}")
 
@@ -180,7 +210,10 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
         all_passed = True
         for rule in active_rules:
             p_lower = policy_text.lower()
-            violated = [kw for kw in rule.get("prohibit_keywords", []) if kw.lower() in p_lower]
+            violated = []
+            for kw in rule.get("prohibit_keywords", []):
+                if kw.lower() in p_lower and not _is_negated(p_lower, kw.lower()):
+                    violated.append(kw)
             missing = [kw for kw in rule.get("enforce_keywords", []) if kw.lower() not in p_lower]
             passed = not violated and not missing
             status = "✅ PASS" if passed else "❌ FAIL"
@@ -204,7 +237,7 @@ def train_rule_adherence(model: torch.nn.Module, tokenizer: Any, parasite_params
             consecutive_passes = 0
 
         # --- 6. REINFORCE: Re-run generated sequence WITH gradients ---
-        _set_epsilon(model, config.EPSILON)
+        _set_epsilon(model, current_epsilon)
         
         # Teacher-force the generated tokens to get log_probs with gradients
         full_seq = tokenizer.decode(gen_tokens[0], skip_special_tokens=False)
